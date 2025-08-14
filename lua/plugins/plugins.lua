@@ -159,6 +159,65 @@ return {
         },
       })
 
+      -- Azure SQL authentication helper function
+      local function get_azure_sql_token()
+        local handle = io.popen(
+          'az account get-access-token --resource="https://database.windows.net" --query accessToken --output tsv 2>/dev/null'
+        )
+        if not handle then
+          return nil
+        end
+        local token = handle:read("*a"):gsub("%s+", "")
+        handle:close()
+        return token ~= "" and token or nil
+      end
+
+      -- Function to create Azure SQL connection with Managed Identity
+      local function connect_azure_sql_mi(server, database, user_id)
+        local token = get_azure_sql_token()
+        if not token then
+          vim.notify(
+            "Failed to get Azure access token. Make sure you're logged in with 'az login'",
+            vim.log.levels.ERROR
+          )
+          return
+        end
+
+        local connection_string
+        if user_id then
+          -- User-assigned managed identity
+          connection_string = string.format(
+            "sqlserver://%s@%s:1433?database=%s&trustServerCertificate=true&connection+timeout=30&encrypt=true&authentication=ActiveDirectoryDefault&user+id=%s&access+token=%s",
+            user_id,
+            server,
+            database,
+            user_id,
+            token
+          )
+        else
+          -- System-assigned managed identity or Azure CLI auth
+          connection_string = string.format(
+            "sqlserver://dummy@%s:1433?database=%s&trustServerCertificate=true&connection+timeout=30&encrypt=true&authentication=ActiveDirectoryDefault&access+token=%s",
+            server,
+            database,
+            token
+          )
+        end
+
+        -- Add connection to dbee
+        local sources = require("dbee").get_sources()
+        local file_source = sources[2] -- Assuming FileSource is second
+        if file_source then
+          file_source:save({
+            id = server .. "_" .. database,
+            name = string.format("%s - %s (Azure MI)", server, database),
+            type = "sqlserver",
+            url = connection_string,
+          })
+          vim.notify(string.format("Added Azure SQL connection: %s/%s", server, database), vim.log.levels.INFO)
+        end
+      end
+
       -- Keymaps for database operations
       vim.keymap.set("n", "<leader>D", function()
         require("dbee").toggle()
@@ -167,6 +226,38 @@ return {
       vim.keymap.set("n", "<leader>De", function()
         require("dbee").execute(vim.fn.input("Query: "))
       end, { desc = "Execute SQL Query" })
+
+      -- Azure SQL Managed Identity connection command
+      vim.keymap.set("n", "<leader>Da", function()
+        local server = vim.fn.input("Azure SQL Server (without .database.windows.net): ")
+        if server == "" then
+          return
+        end
+
+        local database = vim.fn.input("Database name: ")
+        if database == "" then
+          return
+        end
+
+        local user_id = vim.fn.input("User ID (leave empty for system-assigned MI or Azure CLI): ")
+        user_id = user_id == "" and nil or user_id
+
+        connect_azure_sql_mi(server .. ".database.windows.net", database, user_id)
+      end, { desc = "Add Azure SQL MI Connection" })
+
+      -- Quick connect to Azure SQL with environment variables
+      vim.keymap.set("n", "<leader>Dq", function()
+        local server = os.getenv("AZURE_SQL_SERVER")
+        local database = os.getenv("AZURE_SQL_DATABASE")
+        local user_id = os.getenv("AZURE_SQL_USER_ID")
+
+        if not server or not database then
+          vim.notify("Set AZURE_SQL_SERVER and AZURE_SQL_DATABASE environment variables", vim.log.levels.ERROR)
+          return
+        end
+
+        connect_azure_sql_mi(server, database, user_id)
+      end, { desc = "Quick Azure SQL MI Connection (from env)" })
     end,
   },
 
@@ -182,7 +273,7 @@ return {
   {
     "iabdelkareem/csharp.nvim",
     dependencies = {
-      "williamboman/mason.nvim",
+      "mason-org/mason.nvim",
       "mfussenegger/nvim-dap",
       "Tastyep/structlog.nvim",
     },
